@@ -53,7 +53,7 @@ transform = transforms.Compose([
     transforms.ToPILImage(),
     transforms.RandomResizedCrop(224, scale=(0.8, 1.2)),
     transforms.ToTensor(),
-    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+    # transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
 ])
 
 # Dataset dan Dataloader
@@ -175,49 +175,49 @@ def get_scheduler(optimizer):
 def mae_loss(preds, labels):
     return torch.mean(torch.abs(preds - labels))
 
-# Fungsi untuk menguji model
-# def test_model_with_visualization(model, dataloader):
-#     model.eval()
-#     all_yaw_preds, all_pitch_preds, all_roll_preds = [], [] , []
-#     all_yaw_gt, all_pitch_gt, all_roll_gt = [], [], []
+#Fungsi untuk menguji model
+def test_model_with_traffic(model, dataloader):
+    model.eval()
+    all_yaw_preds, all_pitch_preds, all_roll_preds = [], [] , []
+    all_yaw_gt, all_pitch_gt, all_roll_gt = [], [], []
 
-#     with torch.no_grad():
-#         for i, (inputs, labels) in enumerate(dataloader):
-#             inputs, labels = inputs.to(device), labels.to(device)
-#             outputs = model(inputs)
+    with torch.no_grad():
+        for i, (inputs, labels) in enumerate(dataloader):
+            inputs, labels = inputs.to(device), labels.to(device)
+            outputs = model(inputs)
 
-#             # Pastikan output dan label memiliki dimensi yang sama
-#             outputs = outputs.view(-1, 3)  # Output size: [batch_size, 3]
-#             labels = labels.view(-1, 3)    # Label size: [batch_size, 3]
+            # Pastikan output dan label memiliki dimensi yang sama
+            outputs = outputs.view(-1, 3)  # Output size: [batch_size, 3]
+            labels = labels.view(-1, 3)    # Label size: [batch_size, 3]
 
-#             mae = mae_loss(outputs, labels)
+            mae = mae_loss(outputs, labels)
 
-#             # Ekstrak prediksi dan ground truth
-#             outputs_np = outputs.cpu().numpy()
-#             labels_np = labels.cpu().numpy()
+            # Ekstrak prediksi dan ground truth
+            outputs_np = outputs.cpu().numpy()
+            labels_np = labels.cpu().numpy()
 
-#             # Simpan prediksi dan ground truth untuk visualisasi
-#             all_yaw_preds.extend(outputs_np[:, 0])
-#             all_pitch_preds.extend(outputs_np[:, 1])
-#             all_roll_preds.extend(outputs_np[:, 2])
+            # Simpan prediksi dan ground truth untuk visualisasi
+            all_yaw_preds.extend(outputs_np[:, 0])
+            all_pitch_preds.extend(outputs_np[:, 1])
+            all_roll_preds.extend(outputs_np[:, 2])
 
-#             all_yaw_gt.extend(labels_np[:, 0])
-#             all_pitch_gt.extend(labels_np[:, 1])
-#             all_roll_gt.extend(labels_np[:, 2])
+            all_yaw_gt.extend(labels_np[:, 0])
+            all_pitch_gt.extend(labels_np[:, 1])
+            all_roll_gt.extend(labels_np[:, 2])
 
-#             # Cetak prediksi dan ground truth untuk debugging
-#             yaw_pred, pitch_pred, roll_pred = outputs[0].cpu().numpy()
-#             yaw_gt, pitch_gt, roll_gt = labels[0].cpu().numpy()
+            # Cetak prediksi dan ground truth untuk debugging
+            yaw_pred, pitch_pred, roll_pred = outputs[0].cpu().numpy()
+            yaw_gt, pitch_gt, roll_gt = labels[0].cpu().numpy()
             
-#             print(f"Sample {i+1}:")
-#             print(f"  Prediksi - Yaw: {yaw_pred:.2f}, Pitch: {pitch_pred:.2f}, Roll: {roll_pred:.2f}")
-#             print(f"  Ground Truth - Yaw: {yaw_gt:.2f}, Pitch: {pitch_gt:.2f}, Roll: {roll_gt:.2f}")
-#             print(f"  MAE: {mae.item():.4f}")
+            print(f"Sample {i+1}:")
+            print(f"  Prediksi - Yaw: {yaw_pred:.2f}, Pitch: {pitch_pred:.2f}, Roll: {roll_pred:.2f}")
+            print(f"  Ground Truth - Yaw: {yaw_gt:.2f}, Pitch: {pitch_gt:.2f}, Roll: {roll_gt:.2f}")
+            print(f"  MAE: {mae.item():.4f}")
 
-#     # Visualisasi Ground Truth vs Prediksi
-#     plot_comparison(all_yaw_preds, all_yaw_gt, 'Yaw')
-#     plot_comparison(all_pitch_preds, all_pitch_gt, 'Pitch')
-#     plot_comparison(all_roll_preds, all_roll_gt, 'Roll')
+    # Visualisasi Ground Truth vs Prediksi
+    plot_comparison(all_yaw_preds, all_yaw_gt, 'Yaw')
+    plot_comparison(all_pitch_preds, all_pitch_gt, 'Pitch')
+    plot_comparison(all_roll_preds, all_roll_gt, 'Roll')
 
 # Fungsi untuk memplot Ground Truth vs Prediksi
 def plot_comparison(preds, gt, title):
@@ -233,7 +233,7 @@ def plot_comparison(preds, gt, title):
 
 def draw_euler_angles(image, yaw, pitch, roll, center=None, size=100):
     """
-    Menggambar garis yang merepresentasikan Yaw, Pitch, dan Roll pada gambar.
+    Menggambar garis yang merepresentasikan Yaw, Pitch, dan Roll pada gambar dalam ruang 3D.
     
     Args:
     - image: Gambar yang akan ditampilkan garis Euler angles-nya.
@@ -247,25 +247,51 @@ def draw_euler_angles(image, yaw, pitch, roll, center=None, size=100):
     if center is None:
         center = (w // 2, h // 2)  # Default di tengah gambar
 
-    # Konversi Euler angles (yaw, pitch, roll) dari radian ke derajat
+    # Matriks rotasi berdasarkan yaw, pitch, dan roll
+    R_x = np.array([[1, 0, 0],
+                    [0, math.cos(pitch), -math.sin(pitch)],
+                    [0, math.sin(pitch), math.cos(pitch)]])
+    
+    R_y = np.array([[math.cos(yaw), 0, math.sin(yaw)],
+                    [0, 1, 0],
+                    [-math.sin(yaw), 0, math.cos(yaw)]])
+    
+    R_z = np.array([[math.cos(roll), -math.sin(roll), 0],
+                    [math.sin(roll), math.cos(roll), 0],
+                    [0, 0, 1]])
+    
+    # Matriks rotasi akhir
+    R = R_z @ R_y @ R_x
+    
+    # Arah sumbu di ruang 3D
+    axis_points = np.array([[size, 0, 0],  # X (Yaw)
+                            [0, size, 0],  # Y (Pitch)
+                            [0, 0, size]]) # Z (Roll)
+
+    # Melakukan rotasi pada sumbu
+    axis_points_rotated = axis_points @ R.T
+    
+    # Proyeksi ke 2D (hanya ambil koordinat X dan Y untuk gambar)
+    def project_point(point):
+        """ Proyeksi titik 3D ke 2D """
+        x_2d = int(center[0] + point[0])
+        y_2d = int(center[1] - point[1])
+        return (x_2d, y_2d)
+
+    # Menghitung koordinat untuk Yaw, Pitch, dan Roll
+    yaw_end = project_point(axis_points_rotated[0])
+    pitch_end = project_point(axis_points_rotated[1])
+    roll_end = project_point(axis_points_rotated[2])
+
+    # Menggambar garis yaw (merah), pitch (hijau), roll (biru)
+    image = cv2.line(image, center, yaw_end, (0, 0, 255), 2)   # Yaw (merah)
+    image = cv2.line(image, center, pitch_end, (0, 255, 0), 2)  # Pitch (hijau)
+    image = cv2.line(image, center, roll_end, (255, 0, 0), 2)   # Roll (biru)
+
+    # Konversi Euler angles dari radian ke derajat untuk tampilan teks
     yaw_deg = yaw * (180.0 / np.pi)
     pitch_deg = pitch * (180.0 / np.pi)
     roll_deg = roll * (180.0 / np.pi)
-    
-    # Menghitung arah garis untuk masing-masing sudut
-    yaw_x = int(center[0] + size * math.sin(yaw))
-    yaw_y = int(center[1] - size * math.cos(yaw))
-
-    pitch_x = int(center[0] + size * math.sin(pitch))
-    pitch_y = int(center[1] + size * math.cos(pitch))
-
-    roll_x = int(center[0] + size * math.cos(roll))
-    roll_y = int(center[1] + size * math.sin(roll))
-
-    # Menggambar garis yaw (merah), pitch (hijau), roll (biru)
-    image = cv2.line(image, center, (yaw_x, yaw_y), (0, 0, 255), 2)   # Yaw (merah)
-    image = cv2.line(image, center, (pitch_x, pitch_y), (0, 255, 0), 2)  # Pitch (hijau)
-    image = cv2.line(image, center, (roll_x, roll_y), (255, 0, 0), 2)   # Roll (biru)
 
     # Tampilkan informasi Euler angles
     cv2.putText(image, f"Yaw: {yaw_deg:.1f} deg", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
@@ -312,6 +338,9 @@ def test_model_with_visualization(model, dataloader, criterion):
             cv2.waitKey(0)  # Tekan sembarang tombol untuk lanjut ke gambar berikutnya
             cv2.destroyAllWindows()
 
+            print(f"  Prediksi - Yaw: {yaw_pred:.2f}, Pitch: {pitch_pred:.2f}, Roll: {roll_pred:.2f}")
+            print(f"  Ground Truth - Yaw: {yaw_gt:.2f}, Pitch: {pitch_gt:.2f}, Roll: {roll_gt:.2f}")
+            
     avg_mae = running_mae / len(dataloader)
     avg_mae_yaw = running_mae_yaw / len(dataloader)
     avg_mae_pitch = running_mae_pitch / len(dataloader)
@@ -342,7 +371,15 @@ def main():
     elif mode == "test":
         model.load_state_dict(torch.load("headposr_model_300w_90.pth"))
         print("Starting Testing...")
-        test_model_with_visualization(model, dataloader, criterion)
+        number = int(input("Choose with image or traffic (1/2): ").strip().lower())
+
+        if number == 1:
+            test_model_with_visualization(model, dataloader, criterion)
+
+        elif number == 2:
+            test_model_with_traffic(model, dataloader)
+
+
 
 if __name__ == "__main__":
     main()
