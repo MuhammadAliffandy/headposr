@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+from linformer import Linformer
 import torchvision.transforms as transforms
 import torchvision.models as models
 import torch.optim as optim
@@ -13,7 +14,7 @@ import math
 import matplotlib.pyplot as plt
 
 # Dataset AFLW2000-3D dengan file .mat untuk pose
-class LoadDataset(Dataset):
+class AFLW20003DDataset(Dataset):
     def __init__(self, data_dir, transform=None):
         self.data_dir = data_dir
         self.transform = transform
@@ -48,48 +49,6 @@ class LoadDataset(Dataset):
 
         return image, torch.tensor(pose, dtype=torch.float32)
 
-class Dataset300WLP(Dataset):
-    def __init__(self, data_dir, transform=None):
-        self.data_dir = data_dir
-        self.transform = transform
-        self.images = []
-        self.poses = []
-        self._load_data()
-
-    def _load_data(self):
-        # Daftar semua folder yang ada di dalam data_dir (afw, helen, ibug, lfpw, dll)
-        for folder_name in os.listdir(self.data_dir):
-            folder_path = os.path.join(self.data_dir, folder_name)
-
-            if os.path.isdir(folder_path):  # Hanya memproses folder
-                # Baca semua file gambar dalam folder
-                for file_name in os.listdir(folder_path):
-                    if file_name.endswith(".jpg"):  # Hanya memproses file .jpg
-                        image_path = os.path.join(folder_path, file_name)
-                        mat_path = image_path.replace(".jpg", ".mat")
-                        
-                        # Baca gambar
-                        image = cv2.imread(image_path)
-                        
-                        # Baca file .mat untuk pose (yaw, pitch, roll)
-                        if os.path.exists(mat_path):
-                            mat_data = loadmat(mat_path)
-                            pose = mat_data['Pose_Para'][0][:3]  # Ambil yaw, pitch, roll
-                            
-                            self.images.append(image)
-                            self.poses.append(pose)
-
-    def __len__(self):
-        return len(self.images)
-
-    def __getitem__(self, idx):
-        image = self.images[idx]
-        pose = self.poses[idx]
-
-        if self.transform:
-            image = self.transform(image)
-
-        return image, torch.tensor(pose, dtype=torch.float32)
 
 # Transformasi data dengan augmentasi (cropping dan random scaling)
 transform = transforms.Compose([
@@ -103,7 +62,7 @@ transform = transforms.Compose([
 data_dir = "./300W-LP/300W_LP/LFPW"
 # data_dir = "./AFLW2000-3D/AFLW2000"
 # dataset = Dataset300WLP(data_dir, transform=transform)
-dataset = LoadDataset(data_dir, transform=transform)
+dataset = AFLW20003DDataset(data_dir, transform=transform)
 dataloader = DataLoader(dataset, batch_size=16, shuffle=True)
 
 class PositionalEncoding(nn.Module):
@@ -128,19 +87,20 @@ class Connector(nn.Module):
         self.scale_factor = scale_factor  # Faktor S untuk downsampling spasial (opsional)
 
     def forward(self, x):
-        B, C, H, W = x.shape
-        x = self.downsampler(x)  # Mengurangi channel
+        B, C, H, W = x.shape  # B = batch_size, C = channels, H = height, W = width
+        x = self.downsampler(x)  # Mengurangi channel menjadi 'out_channels'
         
-        # Downsampling spasial jika skala > 1
+        # Downsampling spasial jika scale_factor > 1
         if self.scale_factor > 1:
-            H = H // self.scale_factor
-            W = W // self.scale_factor
-            x = F.interpolate(x, size=(H, W), mode='bilinear', align_corners=False)
+            H = H // self.scale_factor  # Sesuaikan height
+            W = W // self.scale_factor  # Sesuaikan width
+            x = F.interpolate(x, size=(H, W), mode='bilinear', align_corners=False)  # Resize
         
-        x = x.view(B, -1, H * W)  # Mengubah jadi sekuensial, misalnya B x d x A (A=H/S*W/S)
-        x = x.permute(0, 2, 1)  # B x A x d untuk transformer input
-        return x
-
+        x = x.view(B, -1, H * W)  # Mengubah jadi sekuensial, misalnya B x d x A (A=H*S*W*S)
+        x = x.permute(0, 2, 1)  # Transpos dimensi menjadi B x A x d, sesuai input transformer
+        
+        seq_len = H * W  # Panjang sekuens A = H * W setelah downsampling
+        return x, seq_len  # Mengembalikan tensor dan panjang sekuens
 
 # Arsitektur Model
 class HeadPosr(nn.Module):
@@ -156,10 +116,10 @@ class HeadPosr(nn.Module):
         # Positional encoding
         self.positional_encoding = PositionalEncoding(d_model=512)
         
-        # Transformer Encoder dengan beberapa lapisan
-        encoder_layer = nn.TransformerEncoderLayer(d_model=512, nhead=8, activation='relu')
-        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=6)
-         
+        # Inisialisasi Transformer dengan Linformer di __init__
+        self.seq_len = None  # Menyimpan panjang sekuens, akan di-update di forward
+        self.transformer = None  # Transformer akan di-inisialisasi setelah panjang sekuens diketahui
+        
         # Head untuk prediksi yaw, pitch, roll
         self.pose_head = nn.Linear(512, 3)
 
@@ -168,13 +128,22 @@ class HeadPosr(nn.Module):
         x = self.backbone(x)  # Output size: [batch_size, 2048, H, W]
         
         # Connector: downsampler and reshaper
-        x = self.connector(x)  # Output size: [batch_size, A, 512]
+        x, seq_len = self.connector(x)  # Output size: [batch_size, A, 512], dan seq_len adalah H * W
         
         # Positional encoding
         x = self.positional_encoding(x)
         
-        # Transformer
-        x = self.transformer(x)  # Output size: [A, batch_size, 512]
+        # Inisialisasi Linformer jika belum diinisialisasi (menggunakan seq_len yang baru diketahui)
+        if self.transformer is None:
+            self.transformer = Linformer(
+                dim=512,
+                seq_len=seq_len,  # Menggunakan panjang sekuens dari output connector
+                depth=6,          # Jumlah lapisan
+                heads=8,          # Jumlah heads perhatian
+                k=128
+            ).to(x.device)
+        
+        x = self.transformer(x)  # Output size: [batch_size, A, 512]
 
         # Global average pooling over the sequence length dimension (A)
         x = x.mean(dim=1)  # Output size: [batch_size, 512]
@@ -189,7 +158,7 @@ def get_lr(optimizer):
         return param_group['lr']
 
 # Fungsi untuk melatih model
-def train_model(model, dataloader, criterion, optimizer, scheduler, num_epochs=10):
+def train_model(model, dataloader, criterion, optimizer, scheduler, num_epochs=90):
     model.train()
     for epoch in range(num_epochs):
         running_loss = 0.0
@@ -223,7 +192,7 @@ def train_model(model, dataloader, criterion, optimizer, scheduler, num_epochs=1
 
 # Scheduler untuk learning rate
 def get_scheduler(optimizer):
-    return torch.optim.lr_scheduler.StepLR(optimizer, step_size=3, gamma=0.1)
+    return torch.optim.lr_scheduler.StepLR(optimizer, step_size=30, gamma=0.1)
 
 def smooth_l1_loss(preds, labels, beta=1.0):
     diff = torch.abs(preds - labels)
@@ -245,7 +214,6 @@ def angular_distance_loss(preds, labels):
     cos_sim = torch.sum(preds_norm * labels_norm, dim=1)
     loss = torch.acos(torch.clamp(cos_sim, -1.0, 1.0))
     return torch.mean(loss)
-
 
 #Fungsi untuk menguji model
 def test_model_with_traffic(model, dataloader):
@@ -444,10 +412,10 @@ def main():
 
     if mode == "train":
         print("Starting Training...")
-        train_model(model, dataloader, criterion, optimizer, scheduler, num_epochs=9)
+        train_model(model, dataloader, criterion, optimizer, scheduler, num_epochs=90)
     
     elif mode == "test":
-        model.load_state_dict(torch.load("headposr_model_300w_512.pth"))
+        model.load_state_dict(torch.load("headposr_model_300w_512.pth"),strict = False)
         print("Starting Testing...")
         number = int(input("Choose with image or traffic (1/2): ").strip().lower())
 
