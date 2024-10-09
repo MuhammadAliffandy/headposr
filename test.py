@@ -11,8 +11,9 @@ from scipy.io import loadmat
 import time
 import math
 import matplotlib.pyplot as plt
+import torch.nn.functional as F
+from memory_profiler import profile
 
-# Dataset AFLW2000-3D dengan file .mat untuk pose
 class LoadDataset(Dataset):
     def __init__(self, data_dir, transform=None):
         self.data_dir = data_dir
@@ -100,8 +101,8 @@ transform = transforms.Compose([
 ])
 
 # Dataset dan Dataloader
-data_dir = "./300W-LP/300W_LP/LFPW"
-# data_dir = "./AFLW2000-3D/AFLW2000"
+# data_dir = "./300W-LP/300W_LP/LFPW"
+data_dir = "./AFLW2000-3D/AFLW2000"
 # dataset = Dataset300WLP(data_dir, transform=transform)
 dataset = LoadDataset(data_dir, transform=transform)
 dataloader = DataLoader(dataset, batch_size=16, shuffle=True)
@@ -151,17 +152,17 @@ class HeadPosr(nn.Module):
         self.backbone = nn.Sequential(*list(self.backbone.children())[:-2])  # Potong sampai layer terakhir sebelum pooling
         
         # Connector untuk downsampling dan reshaping
-        self.connector = Connector(in_channels=2048, out_channels=512)
+        self.connector = Connector(in_channels=2048, out_channels=256)
         
         # Positional encoding
-        self.positional_encoding = PositionalEncoding(d_model=512)
+        self.positional_encoding = PositionalEncoding(d_model=256)
         
         # Transformer Encoder dengan beberapa lapisan
-        encoder_layer = nn.TransformerEncoderLayer(d_model=512, nhead=8, activation='relu')
+        encoder_layer = nn.TransformerEncoderLayer(d_model=256, nhead=8, activation='relu')
         self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=6)
          
         # Head untuk prediksi yaw, pitch, roll
-        self.pose_head = nn.Linear(512, 3)
+        self.pose_head = nn.Linear(256, 3)
 
     def forward(self, x):
         # Backbone
@@ -189,12 +190,18 @@ def get_lr(optimizer):
         return param_group['lr']
 
 # Fungsi untuk melatih model
+@profile
 def train_model(model, dataloader, criterion, optimizer, scheduler, num_epochs=10):
     model.train()
+    
+    # Mulai menghitung waktu training
+    total_start_time = time.time()
+    
     for epoch in range(num_epochs):
+        epoch_start_time = time.time()  # Mulai menghitung waktu per epoch
         running_loss = 0.0
+        
         for i, (inputs, labels) in enumerate(dataloader):
-
             inputs, labels = inputs.to(device), labels.to(device)
 
             optimizer.zero_grad()
@@ -216,9 +223,19 @@ def train_model(model, dataloader, criterion, optimizer, scheduler, num_epochs=1
                 running_loss = 0.0
 
         scheduler.step()
+        
+        # Hitung waktu yang dihabiskan per epoch
+        epoch_end_time = time.time()
+        epoch_duration = epoch_end_time - epoch_start_time
+        print(f"Epoch {epoch+1} finished in {epoch_duration:.2f} seconds.")
+    
+    # Hitung total waktu pelatihan
+    total_end_time = time.time()
+    total_duration = total_end_time - total_start_time
+    print(f"Training completed in {total_duration:.2f} seconds.")
     
     # Simpan model
-    torch.save(model.state_dict(), "headposr_model_300w_512.pth")
+    torch.save(model.state_dict(), "headposr_model_ori_lfpw.pth")
     print("Model saved to headposr_model_aflw.pth")
 
 # Scheduler untuk learning rate
@@ -250,7 +267,11 @@ def angular_distance_loss(preds, labels):
 #Fungsi untuk menguji model
 def test_model_with_traffic(model, dataloader):
     model.eval()
-    all_yaw_preds, all_pitch_preds, all_roll_preds = [], [] , []
+    
+    total_smooth, total_mae, total_mse, total_angular = 0.0, 0.0, 0.0, 0.0
+    total_samples = 0
+
+    all_yaw_preds, all_pitch_preds, all_roll_preds = [], [], []
     all_yaw_gt, all_pitch_gt, all_roll_gt = [], [], []
 
     with torch.no_grad():
@@ -267,6 +288,14 @@ def test_model_with_traffic(model, dataloader):
             mse = mse_loss(outputs, labels)
             angular = angular_distance_loss(outputs, labels)
 
+            # Tambahkan hasil loss untuk setiap batch
+            total_smooth += smooth.item() * inputs.size(0)
+            total_mae += mae.item() * inputs.size(0)
+            total_mse += mse.item() * inputs.size(0)
+            total_angular += angular.item() * inputs.size(0)
+
+            total_samples += inputs.size(0)
+
             # Ekstrak prediksi dan ground truth
             outputs_np = outputs.cpu().numpy()
             labels_np = labels.cpu().numpy()
@@ -280,17 +309,29 @@ def test_model_with_traffic(model, dataloader):
             all_pitch_gt.extend(labels_np[:, 1])
             all_roll_gt.extend(labels_np[:, 2])
 
-            # Cetak prediksi dan ground truth untuk debugging
-            yaw_pred, pitch_pred, roll_pred = outputs[0].cpu().numpy()
-            yaw_gt, pitch_gt, roll_gt = labels[0].cpu().numpy()
-            
-            print(f"Sample {i+1}:")
-            print(f"  Prediksi - Yaw: {yaw_pred:.2f}, Pitch: {pitch_pred:.2f}, Roll: {roll_pred:.2f}")
-            print(f"  Ground Truth - Yaw: {yaw_gt:.2f}, Pitch: {pitch_gt:.2f}, Roll: {roll_gt:.2f}")
-            print(f"  SMOOTH 11: {smooth.item():.4f}")
-            print(f"  MSE: {mse.item():.4f}")
-            print(f"  MAE: {mae.item():.4f}")
-            print(f"  ANGULAR DISTANCE: {angular.item():.4f}")
+            # Cetak prediksi dan ground truth per image (per gambar)
+            for j in range(len(outputs)):
+                yaw_pred, pitch_pred, roll_pred = outputs_np[j]
+                yaw_gt, pitch_gt, roll_gt = labels_np[j]
+                
+                print(f"Sample {i*len(outputs)+j+1}:")
+                print(f"  Prediksi - Yaw: {yaw_pred:.2f}, Pitch: {pitch_pred:.2f}, Roll: {roll_pred:.2f}")
+                print(f"  Ground Truth - Yaw: {yaw_gt:.2f}, Pitch: {pitch_gt:.2f}, Roll: {roll_gt:.2f}")
+                print(f"  SMOOTH L1: {smooth.item():.4f}")
+                print(f"  MSE: {mse.item():.4f}")
+                print(f"  MAE: {mae.item():.4f}")
+                print(f"  Angular Distance: {angular.item():.4f}")
+
+    # Hitung rata-rata loss di seluruh dataset
+    avg_smooth = total_smooth / total_samples
+    avg_mae = (total_mae / total_samples) * (180 / np.pi)
+    avg_mse = (total_mse / total_samples) * (180 / np.pi)
+    avg_angular = (total_angular / total_samples) * (180 / np.pi)
+
+    print(f"\nRata-rata SMOOTH L1: {avg_smooth:.4f}")
+    print(f"Rata-rata MSE: {avg_mse:.4f}")
+    print(f"Rata-rata MAE: {avg_mae:.4f}")
+    print(f"Rata-rata Angular Distance: {avg_angular:.4f}")
 
     # Visualisasi Ground Truth vs Prediksi
     plot_comparison(all_yaw_preds, all_yaw_gt, 'Yaw')
@@ -444,10 +485,10 @@ def main():
 
     if mode == "train":
         print("Starting Training...")
-        train_model(model, dataloader, criterion, optimizer, scheduler, num_epochs=9)
+        train_model(model, dataloader, criterion, optimizer, scheduler, num_epochs=1)
     
     elif mode == "test":
-        model.load_state_dict(torch.load("headposr_model_300w_512.pth"))
+        model.load_state_dict(torch.load("headposr_model_ori_lfpw.pth"))
         print("Starting Testing...")
         number = int(input("Choose with image or traffic (1/2): ").strip().lower())
 
