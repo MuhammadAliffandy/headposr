@@ -488,7 +488,7 @@ def main():
         train_model(model, dataloader, criterion, optimizer, scheduler, num_epochs=1)
     
     elif mode == "test":
-        model.load_state_dict(torch.load("headposr_model_ori_lfpw.pth"))
+        model.load_state_dict(torch.load("headposr_model_300w_90.pth"))
         print("Starting Testing...")
         number = int(input("Choose with image or traffic (1/2): ").strip().lower())
 

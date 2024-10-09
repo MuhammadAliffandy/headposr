@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torchvision.transforms as transforms
 import torchvision.models as models
-from torchvision.models import EfficientNet_B3_Weights 
+from torchvision.models import EfficientNet_B3_Weights , EfficientNet_B0_Weights 
 import torch.optim as optim
 from torch.utils.data import DataLoader, Dataset
 import numpy as np
@@ -54,14 +54,14 @@ class LoadDataset(Dataset):
 # Transformasi data dengan augmentasi (cropping dan random scaling)
 transform = transforms.Compose([
     transforms.ToPILImage(),
-    transforms.RandomResizedCrop(260, scale=(0.8, 1.2)),
+    # transforms.RandomResizedCrop(224, scale=(0.8, 1.2)),
     transforms.ToTensor(),
 ])
 
 # Dataset dan Dataloader
 
-# data_dir = "./300W-LP/300W_LP/LFPW"
-data_dir = "./AFLW2000-3D/AFLW2000"
+data_dir = "./300W-LP/300W_LP/IBUG"
+# data_dir = "./AFLW2000-3D/AFLW2000"
 # dataset = Dataset300WLP(data_dir, transform=transform)
 dataset = LoadDataset(data_dir, transform=transform)
 dataloader = DataLoader(dataset, batch_size=16, shuffle=True)
@@ -108,11 +108,11 @@ class HeadPosr(nn.Module):
     def __init__(self):
         super(HeadPosr, self).__init__()
         # Backbone menggunakan EfficientNet
-        self.backbone = models.efficientnet_b3(weights = EfficientNet_B3_Weights.DEFAULT)
+        self.backbone = models.efficientnet_b0(weights = EfficientNet_B0_Weights.DEFAULT)
         self.backbone = nn.Sequential(*list(self.backbone.children())[:-2])  # Potong sampai layer terakhir sebelum pooling
         
         # Connector untuk downsampling dan reshaping
-        self.connector = Connector(in_channels=1536, out_channels=256)
+        self.connector = Connector(in_channels=1280, out_channels=256)
         
         # Positional encoding
         self.positional_encoding = PositionalEncoding(d_model=256)
@@ -157,58 +157,81 @@ def v_loss(outputs, labels):
 
 # Fungsi untuk melatih model
 @profile
-def train_model(model, dataloader, criterion, optimizer, scheduler, num_epochs=90 ,model_name = 'headposr_model'):
-
-
+def train_model(model, dataloader, criterion, optimizer, scheduler, num_epochs=90, model_name='headposr_model', patience=5):
     model.train()
-    
+
+    # Early stopping variables
+    best_loss = float('inf')
+    patience_counter = 0
+
     # Mulai menghitung waktu training
     total_start_time = time.time()
-    
-    for epoch in range(num_epochs):
-        epoch_start_time = time.time()  # Mulai menghitung waktu per epoch
-        running_loss = 0.0
-        running_v_loss = 0.0
-        
-        for i, (inputs, labels) in enumerate(dataloader):
-            inputs, labels = inputs.to(device), labels.to(device)
 
-            optimizer.zero_grad()
-            outputs = model(inputs)
+    try:
+        for epoch in range(num_epochs):
+            epoch_start_time = time.time()  # Mulai menghitung waktu per epoch
+            running_loss = 0.0
+            running_v_loss = 0.0
 
-            # Pastikan output dan label memiliki dimensi yang sama
-            outputs = outputs.view(-1, 3)  # Output size: [batch_size, 3]
-            labels = labels.view(-1, 3)    # Label size: [batch_size, 3]
+            for i, (inputs, labels) in enumerate(dataloader):
+                inputs, labels = inputs.to(device), labels.to(device)
 
-            loss = criterion(outputs, labels)  # Hitung loss
-            loss_v = v_loss(outputs, labels)  # Hitung loss
+                optimizer.zero_grad()
+                outputs = model(inputs)
 
-            loss.backward()  # Backpropagation
-            optimizer.step()  # Update parameter model
-            running_loss += loss.item()
-            running_v_loss += loss_v.item()
+                # Pastikan output dan label memiliki dimensi yang sama
+                outputs = outputs.view(-1, 3)  # Output size: [batch_size, 3]
+                labels = labels.view(-1, 3)    # Label size: [batch_size, 3]
 
-            current_lr = get_lr(optimizer)
-            torch.cuda.empty_cache()
-            if i % 10 == 9:
-                print(f"Epoch [{epoch+1}/{num_epochs}], Step [{i+1}], Loss: {running_loss/10:.4f}, v_loss: {running_v_loss/10:.4f} ,LR: {current_lr:.6f}")
-                running_loss = 0.0
+                loss = criterion(outputs, labels)  # Hitung loss
+                loss_v = v_loss(outputs, labels)  # Hitung loss
 
-        scheduler.step()
-        
-        # Hitung waktu yang dihabiskan per epoch
-        epoch_end_time = time.time()
-        epoch_duration = epoch_end_time - epoch_start_time
-        print(f"Epoch {epoch+1} finished in {epoch_duration:.2f} seconds.")
-    
+                loss.backward()  # Backpropagation
+                optimizer.step()  # Update parameter model
+                running_loss += loss.item()
+                running_v_loss += loss_v.item()
+
+                current_lr = get_lr(optimizer)
+                torch.cuda.empty_cache()
+                if i % 10 == 9:
+                    print(f"Epoch [{epoch+1}/{num_epochs}], Step [{i+1}], Loss: {running_loss/10:.4f}, v_loss: {running_v_loss/10:.4f}, LR: {current_lr:.6f}")
+                    running_loss = 0.0
+
+            scheduler.step()
+
+            # Hitung waktu yang dihabiskan per epoch
+            epoch_end_time = time.time()
+            epoch_duration = epoch_end_time - epoch_start_time
+            print(f"Epoch {epoch+1} finished in {epoch_duration:.2f} seconds.")
+
+            # Early stopping: cek apakah validasi loss membaik
+            avg_v_loss = running_v_loss / len(dataloader)  # Rata-rata validasi loss
+            if avg_v_loss < best_loss:
+                best_loss = avg_v_loss
+                patience_counter = 0  # Reset counter jika ada peningkatan
+                print(f"Validation loss improved.")
+            else:
+                patience_counter += 1
+                print(f"No improvement in validation loss. Patience counter: {patience_counter}/{patience}.")
+
+            # Hentikan training jika patience terlampaui
+            if patience_counter >= patience:
+                print(f"Early stopping triggered. No improvement in {patience} consecutive epochs.")
+                break
+
+    except KeyboardInterrupt:
+        print("Training interrupted. Saving the current model...")
+
     # Hitung total waktu pelatihan
     total_end_time = time.time()
     total_duration = total_end_time - total_start_time
     print(f"Training completed in {total_duration:.2f} seconds.")
-    
-    # Simpan model
+
+    # Simpan model terakhir, bahkan jika dihentikan dengan Ctrl+C
     torch.save(model.state_dict(), f"{model_name}.pth")
-    print(f"Model saved to {model_name}.pth")
+    print(f"Final model saved to {model_name}.pth.")
+
+
 
 # Scheduler untuk learning rate
 def get_scheduler(optimizer):
@@ -323,23 +346,30 @@ def plot_comparison(preds, gt, title):
     plt.grid(True)
     plt.show()
 
+import cv2
+import numpy as np
+import math
+
 def draw_euler_angles(image, yaw, pitch, roll, center=None, size=100):
     """
     Menggambar garis yang merepresentasikan Yaw, Pitch, dan Roll pada gambar dalam ruang 3D.
     
     Args:
-    - image: Gambar yang akan ditampilkan garis Euler angles-nya.
+    - image: Gambar (numpy array) yang akan ditampilkan garis Euler angles-nya.
     - yaw: Sudut yaw (radian).
     - pitch: Sudut pitch (radian).
     - roll: Sudut roll (radian).
     - center: Titik pusat untuk menggambar garis. Jika None, gunakan tengah gambar.
-    - size: Panjang garis Euler angles.
+    - size: Panjang garis Euler angles (default: 100).
+    
+    Returns:
+    - Gambar dengan garis yaw (merah), pitch (hijau), roll (biru) serta informasi sudut dalam derajat.
     """
     h, w, _ = image.shape
     if center is None:
         center = (w // 2, h // 2)  # Default di tengah gambar
 
-    # Matriks rotasi berdasarkan yaw, pitch, dan roll
+    # Matriks rotasi berdasarkan yaw, pitch, dan roll (diurutkan dengan benar)
     R_x = np.array([[1, 0, 0],
                     [0, math.cos(pitch), -math.sin(pitch)],
                     [0, math.sin(pitch), math.cos(pitch)]])
@@ -352,18 +382,18 @@ def draw_euler_angles(image, yaw, pitch, roll, center=None, size=100):
                     [math.sin(roll), math.cos(roll), 0],
                     [0, 0, 1]])
     
-    # Matriks rotasi akhir
+    # Matriks rotasi akhir (roll, yaw, pitch)
     R = R_z @ R_y @ R_x
     
-    # Arah sumbu di ruang 3D
+    # Arah sumbu di ruang 3D (X: Yaw, Y: Pitch, Z: Roll)
     axis_points = np.array([[size, 0, 0],  # X (Yaw)
                             [0, size, 0],  # Y (Pitch)
                             [0, 0, size]]) # Z (Roll)
 
-    # Melakukan rotasi pada sumbu
+    # Melakukan rotasi pada sumbu (apply rotasi Euler)
     axis_points_rotated = axis_points @ R.T
     
-    # Proyeksi ke 2D (hanya ambil koordinat X dan Y untuk gambar)
+    # Proyeksi ke 2D
     def project_point(point):
         """ Proyeksi titik 3D ke 2D """
         x_2d = int(center[0] + point[0])
@@ -375,7 +405,7 @@ def draw_euler_angles(image, yaw, pitch, roll, center=None, size=100):
     pitch_end = project_point(axis_points_rotated[1])
     roll_end = project_point(axis_points_rotated[2])
 
-    # Menggambar garis yaw (merah), pitch (hijau), roll (biru)
+    # Menggambar garis yaw (merah), pitch (hijau), roll (biru) dengan tebal 2
     image = cv2.line(image, center, yaw_end, (0, 0, 255), 2)   # Yaw (merah)
     image = cv2.line(image, center, pitch_end, (0, 255, 0), 2)  # Pitch (hijau)
     image = cv2.line(image, center, roll_end, (255, 0, 0), 2)   # Roll (biru)
@@ -385,12 +415,13 @@ def draw_euler_angles(image, yaw, pitch, roll, center=None, size=100):
     pitch_deg = pitch * (180.0 / np.pi)
     roll_deg = roll * (180.0 / np.pi)
 
-    # Tampilkan informasi Euler angles
+    # Tampilkan informasi Euler angles (yaw, pitch, roll)
     cv2.putText(image, f"Yaw: {yaw_deg:.1f} deg", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
     cv2.putText(image, f"Pitch: {pitch_deg:.1f} deg", (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
     cv2.putText(image, f"Roll: {roll_deg:.1f} deg", (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 0), 2)
 
     return image
+
 
 # Fungsi untuk menguji model dengan visualisasi Euler angles pada gambar
 def test_model_with_visualization(model, dataloader, criterion):
@@ -458,11 +489,11 @@ def main():
 
     if mode == "train":
         print("Starting Training...")
-        model.load_state_dict(torch.load("model_afw_lfpw_ibug_helen2.pth",weights_only=True))
-        train_model(model, dataloader, criterion, optimizer, scheduler, num_epochs=1 , model_name ='model_afw_lfpw_ibug_helen')
+        model.load_state_dict(torch.load("headposr_model_afw_b0_90epouch.pth",weights_only=True))
+        train_model(model, dataloader, criterion, optimizer, scheduler, num_epochs=90 , model_name ='headposr_model_afw_ibug_b0_90epouch')
     
     elif mode == "test":
-        model.load_state_dict(torch.load("headposr_model_lfpwb3_ef_5epouch.pth"))
+        model.load_state_dict(torch.load("headposr_model_afw_ibug_b0_90epouch.pth"))
         print("Starting Testing...")
         number = int(input("Choose with image or traffic (1/2): ").strip().lower())
 
