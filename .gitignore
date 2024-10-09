@@ -3,4 +3,5 @@ AFLW2000-3D
 headposr_model_300w_90.pth
 headposr_model_aflw_90.pth
 headposr
+subset_remainder
 *.pth
