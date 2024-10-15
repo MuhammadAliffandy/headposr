@@ -101,7 +101,7 @@ transform = transforms.Compose([
 ])
 
 # Dataset dan Dataloader
-# data_dir = "./300W-LP/300W_LP/LFPW"
+# data_dir = "./300W-LP/300W_LP/AFW"
 data_dir = "./AFLW2000-3D/AFLW2000"
 # dataset = Dataset300WLP(data_dir, transform=transform)
 dataset = LoadDataset(data_dir, transform=transform)
@@ -488,7 +488,7 @@ def main():
         train_model(model, dataloader, criterion, optimizer, scheduler, num_epochs=1)
     
     elif mode == "test":
-        model.load_state_dict(torch.load("headposr_model_300w_90.pth"))
+        model.load_state_dict(torch.load("./model/headposr_model_300w_90.pth"))
         print("Starting Testing...")
         number = int(input("Choose with image or traffic (1/2): ").strip().lower())
 
